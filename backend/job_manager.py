@@ -230,6 +230,13 @@ class JobManager:
         - 大小写不敏感替换该段【所有】%chk 行为任务 chk_path；
         - %NoSave 删除其之前命名的 scratch/chk，因此段内保证 %nosave 在 %chk 前；
         - 仅主段（第一段）在缺 chk 时插入，插到最后一个 nosave 之后；其他段不新增 chk。
+
+        G09 兼容性：Gaussian 09 与 16 的 %NoSave / %Chk 语义一致（NoSave 只影响
+        在它【之前】命名的 scratch 文件），上述规范化顺序对 G09W 同样安全；
+        %chk 行使用绝对路径，G09W 接受带盘符的 Windows 路径。
+        注意：G09W 是 ANSI 程序，工作目录若含中文（本机默认路径含"工作集"），
+        个别版本会对非 ASCII 路径报 File operation error，遇到时把
+        GAUSSIAN_WORK_DIR 指到纯 ASCII 路径即可。
         """
         chk_line = f"%chk={chk_path}"
         chk_re = re.compile(r"^\s*%chk\s*=", re.IGNORECASE)
@@ -466,12 +473,21 @@ class JobManager:
         log_path = settings.work_dir / f"{safe_name}_{job_id}.log"
         chk_path = settings.work_dir / f"{safe_name}_{job_id}.chk"
 
-        # B7: 提交边界校验 GJF（原子数 / 资源 / 电荷多重度），禁止原文绕过
+        # B7: 提交边界校验 GJF（原子数 / 资源 / 电荷多重度），禁止原文绕过。
+        # 资源上限取自 settings：G09W 默认 2048MB / nproc 硬上限 2（默认值 1）；
+        # G16 可用 GAUSSIAN_MEM_BUDGET_MB / GAUSSIAN_MAX_NPROC 放宽。
         from .gaussian_input import validate_gjf
         try:
-            validate_gjf(gjf_content, max_atoms=settings.max_atoms)
+            gjf_warnings = validate_gjf(
+                gjf_content,
+                max_atoms=settings.max_atoms,
+                mem_budget_mb=settings.gaussian_mem_budget_mb,
+                max_nproc=settings.gaussian_max_nproc,
+            )
         except ValueError as e:
             return {"ok": False, "error": f"GJF 校验未通过：{e}"}
+        for w in gjf_warnings:
+            logger.warning("GJF warning: %s", w)
 
         # B1: 原子获取 gaussian lease（scheduler 内部加锁，杜绝并发请求同时通过检查）
         try:
@@ -505,8 +521,18 @@ class JobManager:
             with open(gjf_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(content)
 
-            # Windows: g16.exe input.gjf output.log
+            # Windows 控制台调用：g09.exe/g16.exe input.gjf output.log
+            # （Gaussian 09 与 16 接受相同的命令行形式；G09W 的 GUI 版 g09w.exe
+            #  不用于批处理，所以默认指向 g09.exe）
             cmd = [settings.gaussian_exe, str(gjf_path), str(log_path)]
+            # G09W 必须能通过 GAUSS_EXEDIR 找到 l1.exe 等辅助程序，否则 log 里报
+            # "No executable for file l1.exe"（Search path GAUSS_EXEDIR is empty）；
+            # 显式注入按 g09.exe 目录派生的值，避免依赖用户是否设过环境变量。
+            env = os.environ.copy()
+            env.setdefault("GAUSS_EXEDIR", str(settings.gauss_exedir))
+            scr = str(settings.gauss_scrdir) if settings.gauss_scrdir is not None else ""
+            if scr and scr.lower() not in {"-1", "none", "off"}:
+                env.setdefault("GAUSS_SCRDIR", scr)
             creationflags = 0
             if os.name == "nt":
                 # CREATE_NO_WINDOW；CREATE_NEW_PROCESS_GROUP 只用于与后端控制台解耦，
@@ -515,6 +541,7 @@ class JobManager:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(settings.work_dir),
+                env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
@@ -534,7 +561,7 @@ class JobManager:
             except Exception:
                 if not self._write_pid_recover(job):
                     job.error = "运行状态与恢复凭据均写盘失败：进程仍在运行，但重启后可能无法接管"
-            return {"ok": True, "job": asdict(job)}
+            return {"ok": True, "job": asdict(job), "warnings": gjf_warnings}
         except Exception as exc:
             if proc_started:
                 # 进程已在运行：保留 lease，绝不释放；即便完整记录写盘失败，也落最小 pid 恢复文件
@@ -546,7 +573,7 @@ class JobManager:
                 except Exception:
                     if not self._write_pid_recover(job):
                         job.error = f"启动后状态与恢复凭据写盘失败（进程仍在运行，重启后可能丢失）：{exc}"
-                return {"ok": True, "job": asdict(job)}
+                return {"ok": True, "job": asdict(job), "warnings": gjf_warnings}
             # 进程未启动：安全释放 lease，记 failed。
             self._release_lease(job_id)
             job.status = "failed"
@@ -555,7 +582,7 @@ class JobManager:
                 self._save(job)
             except Exception:
                 pass
-            return {"ok": False, "error": job.error, "job": asdict(job)}
+            return {"ok": False, "error": job.error, "job": asdict(job), "warnings": gjf_warnings}
 
     def get_job(self, job_id: str, log_tail_lines: int = 30) -> Optional[Dict]:
         """获取任务状态（含实时解析）。"""
@@ -607,7 +634,7 @@ class JobManager:
         if job.status != "running":
             return {"ok": False, "error": f"任务状态为 {job.status}，无法停止"}
 
-        # B9: 终止进程树（g16.exe 可能有子进程 l101.exe 等），并复核进程确实消失，
+        # B9: 终止进程树（g09.exe/g16.exe 可能有子进程 l101.exe 等），并复核进程确实消失，
         # 未确认结束不得写入 stopped，避免 taskkill 失败/PID 复用时误报成功。
         # N8: 统一初始化错误信息变量，杜绝回退路径引用未赋值的 result 造成 UnboundLocalError。
         target_pid = job.pid

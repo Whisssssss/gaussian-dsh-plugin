@@ -1,8 +1,8 @@
 {
   "name": "@gd/gp",
-  "version": "0.2.0",
+  "version": "0.2.0-g09.1",
   "type": "module",
-  "description": "DSH (DeepSeek Harness) plugin for Gaussian 16: input generation, SMILES-to-3D (RDKit), output parsing, serial job management, BSE basis sets, Multiwfn/VMD post-processing (orbital/ESP/RDG).",
+  "description": "DSH (DeepSeek Harness) plugin for Gaussian 09W / 16: input generation, SMILES-to-3D (RDKit), output parsing, serial job management, BSE basis sets, Multiwfn/VMD post-processing (orbital/ESP/RDG). Local fork tuned for Gaussian 09W (32-bit) + GaussView 5.",
   "main": "./lib/index.js",
   "engines": {
     "node": ">=20"

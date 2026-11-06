@@ -249,6 +249,22 @@ class BackendManager {
     try {
       this.state = "starting";
       this.managedToken = this._randomToken();
+      // G09 本地化：后端 exe 通过环境变量读取配置，这里给本机默认值（外部环境变量优先）。
+      // G09W 必须 GAUSS_EXEDIR，否则报 No executable for file l1.exe；
+      // G09 的 %mem 只接受整数 MB，%nprocshared 实测只能 1（2 核会崩）。
+      const g09Env = {
+        GAUSSIAN_EXE: process.env.GAUSSIAN_EXE ?? "D:\\Gauss\\g09w\\g09.exe",
+        FORMCHK_EXE: process.env.FORMCHK_EXE ?? "D:\\Gauss\\g09w\\formchk.exe",
+        GAUSS_EXEDIR: process.env.GAUSS_EXEDIR ?? "D:\\Gauss\\g09w",
+        GAUSS_SCRDIR: process.env.GAUSS_SCRDIR ?? "D:\\Gauss\\g09w\\Scratch",
+        GAUSSIAN_WORK_DIR: process.env.GAUSSIAN_WORK_DIR ?? "D:\\DSH\\WorkZone\\dsh-gauss-work",
+        GAUSSIAN_DATA_DIR: process.env.GAUSSIAN_DATA_DIR ?? join(homedir(), ".gaussian-dsh"),
+        GAUSSIAN_DEFAULT_MEM: process.env.GAUSSIAN_DEFAULT_MEM ?? "1000MB",
+        GAUSSIAN_DEFAULT_NPROC: process.env.GAUSSIAN_DEFAULT_NPROC ?? "1",
+      };
+      for (const dir of [g09Env.GAUSSIAN_WORK_DIR, g09Env.GAUSS_SCRDIR, g09Env.GAUSSIAN_DATA_DIR]) {
+        try { mkdirSync(dir, { recursive: true }); } catch { /* 目录不可建时交给后端报错 */ }
+      }
       // B4: cwd 是 DSH SpawnSpec 的必需字符串字段，必须始终给一个真实存在的绝对目录，
       // 拿不到候选时兜底系统临时目录，绝不能省略或传 undefined。
       const cwd = this._resolveCwd();
@@ -257,6 +273,7 @@ class BackendManager {
         env: {
           GAUSSIAN_MANAGED_TOKEN: this.managedToken,
           GAUSSIAN_BACKEND_PORT: String(this._port()),
+          ...g09Env,
         },
         // N1/M12: DSH SubprocessOutputMode 只支持 pipe/inherit/有界 collect，不支持 "ignore"。
         // 我们用 health 轮询判定就绪，不读 ready record；stdout/stderr 用 inherit 直接挂到
@@ -522,7 +539,7 @@ function defineTool(options) {
 
 const GAUSSIAN_GUIDANCE = `## Gaussian 计算助手（gaussian-dsh 插件）
 
-本插件辅助 Gaussian 16 计算，后端运行在本机 http://127.0.0.1:8765。
+本插件辅助 Gaussian 计算（本机为 Gaussian 09W Rev C.01），后端运行在本机 http://127.0.0.1:8765。
 
 ### 工作流
 1. **生成输入**：用 generate_gaussian_input 生成 .gjf（自动写入工作目录 E:\\YDW\\ChemDatas\\Gjf）。
@@ -531,9 +548,11 @@ const GAUSSIAN_GUIDANCE = `## Gaussian 计算助手（gaussian-dsh 插件）
 4. **解析结果**：任务完成后用 parse_gaussian_output 提取能量、HOMO-LUMO、偶极矩、收敛状态等。
 
 ### 硬件约束（用户机器）
-- CPU: AMD Ryzen 7 9700X（8核16线程），默认 nprocshared=8
-- 内存: 15.1 GB，默认 mem=12GB
-- Gaussian 16 Rev A.03，路径 D:\\G16W\\g16.exe
+- CPU: AMD Ryzen 7 9700X（8核16线程）；Gaussian 09W 是 32 位程序，实测 %nprocshared=2 会直接崩溃，默认必须 %nprocshared=1
+- 内存: 15.1 GB；G09W 单进程 32 位地址空间上限约 2GB，默认 %mem=1000MB（G09 不接受小数 GB，写 1.5GB 会报 Error parsing percent card；不要写 12GB）
+- Gaussian 09W Rev C.01，路径 D:\\Gauss\\g09w\\g09.exe；formchk D:\\Gauss\\g09w\\formchk.exe
+- GaussView 5.0.8，路径 D:\\Gauss\\g09w\\gview.exe（可用于查看 .log/.chk/.fchk/.cube）
+- 后端进程必须继承环境变量 GAUSS_EXEDIR=D:\\Gauss\\g09w（否则报 No executable for file l1.exe），建议同时设 GAUSS_SCRDIR=D:\\Gauss\\g09w\\Scratch
 - 严禁并行多任务，必须串行
 
 ### 重要提醒
@@ -578,8 +597,8 @@ function buildTools(client) {
       multiplicity: { type: "integer", description: "自旋多重度（闭壳层=1，二重态=2）", default: 1 },
       atoms: { type: "array", description: "原子坐标 [[元素符号, x, y, z], ...]", items: { type: "array" } },
       extra_keywords: { type: "array", description: "额外关键词，如 ['scf=tight','empiricaldispersion=gd3bj','int=ultrafine']", items: { type: "string" } },
-      mem: { type: "string", description: "内存，默认 12GB（不要超过物理内存15GB）" },
-      nproc: { type: "integer", description: "核数，默认 8" },
+      mem: { type: "string", description: "内存，默认 1000MB（G09W 32 位，单进程上限约 2GB；G09 不接受 1.5GB 这种小数，用整数 MB）" },
+      nproc: { type: "integer", description: "核数，默认 1（G09W 32 位，实测 2 核会崩溃，必须串行）" },
     },
     execute: (args, exec) => client.post("/v1/gaussian-inputs", args, exec.signal),
   }));
@@ -599,7 +618,7 @@ function buildTools(client) {
   // 4. 提交任务
   tools.push(defineTool({
     name: "submit_gaussian_job",
-    description: "提交 Gaussian 计算任务（串行执行：若已有任务在运行则拒绝）。传入 gjf_content，后端写入工作目录并启动 g16.exe。返回 job_id 和任务信息。提交前用 generate_gaussian_input 生成内容。",
+    description: "提交 Gaussian 计算任务（串行执行：若已有任务在运行则拒绝）。传入 gjf_content，后端写入工作目录并启动 gaussian_exe（本机为 g09.exe）。返回 job_id 和任务信息。提交前用 generate_gaussian_input 生成内容。",
     parameters: {
       job_name: { type: "string", description: "任务名", default: "gaussian_job" },
       gjf_content: { type: "string", description: "完整的 .gjf 文件内容（来自 generate_gaussian_input 的 content 字段）", required: true },

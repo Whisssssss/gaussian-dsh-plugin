@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .basis_set import basis_set_client
-from .config import settings
+from .config import gaussian_version_hint, settings
 from .gaussian_input import GaussianInputRequest, generate_gjf
 from .gaussian_output import output_to_dict, parse_gaussian_log
 from .job_manager import job_manager
@@ -196,16 +196,59 @@ def health():
 
 @app.get("/v1/status")
 def status():
-    """服务状态：Gaussian 可执行文件、Sobko、工作目录。"""
+    """服务状态：Gaussian 可执行文件与版本、资源默认值、Sobko、工作目录。
+
+    不执行 Gaussian：版本仅按可执行文件名推断（g09.exe → "09"，g16.exe → "16"），
+    供 UI 与人工核对本机装的是 G09W 还是 G16。
+    """
     gaussian_exists = Path(settings.gaussian_exe).exists()
+    version_hint = gaussian_version_hint(settings.gaussian_exe)
+    scr = str(settings.gauss_scrdir) if settings.gauss_scrdir is not None else ""
+    scr_active = bool(scr) and scr.lower() not in {"-1", "none", "off"}
     sobko_info = sobko_client.is_available()
     lease = chem_scheduler.current_lease()
+
+    # G09W 运行注意事项：不执行 Gaussian，只做环境/配置层面的提示
+    gaussian_notes: List[str] = []
+    if version_hint == "09":
+        gaussian_notes.append(
+            "G09W 是 32 位程序：%mem 只接受整数 MB（本机默认 "
+            f"{settings.default_mem}），%nprocshared 实测 >1 会在 route 打印后直接退出，"
+            f"默认保持 {settings.default_nproc} 核。"
+        )
+        if not os.environ.get("GAUSS_EXEDIR"):
+            gaussian_notes.append(
+                "环境变量 GAUSS_EXEDIR 未设置；后端启动 Gaussian 时会自动注入 "
+                f"{settings.gauss_exedir}（否则会报 'No executable for file l1.exe'）。"
+            )
+        if scr_active and not Path(scr).exists():
+            gaussian_notes.append(f"GAUSS_SCRDIR={scr} 不存在，Gaussian 可能无 scratch 可用。")
+    if settings.default_nproc > 1 and version_hint == "09":
+        gaussian_notes.append(
+            f"当前 GAUSSIAN_DEFAULT_NPROC={settings.default_nproc}，G09W 下建议设为 1。"
+        )
+
     return {
         "status": "ok",
         "version": "0.2.0",
         "gaussian": {
             "exe": settings.gaussian_exe,
             "exists": gaussian_exists,
+            "version": version_hint,
+            "version_name": f"Gaussian {version_hint}" if version_hint else None,
+            "formchk_exe": str(settings.formchk_exe) if settings.formchk_exe else None,
+            "formchk_exists": bool(
+                settings.formchk_exe and Path(settings.formchk_exe).exists()
+            ),
+            # G09W（32 位）单进程内存上限约 2GB；G16 可用环境变量放宽
+            "mem_budget_mb": settings.gaussian_mem_budget_mb,
+            "max_nproc": settings.gaussian_max_nproc,
+            # G09W 必须能找到 l1.exe：GAUSS_EXEDIR / GAUSS_SCRDIR
+            "gauss_exedir": str(settings.gauss_exedir),
+            "gauss_exedir_exists": Path(settings.gauss_exedir).exists(),
+            "gauss_scrdir": scr if scr_active else None,
+            "gauss_scrdir_exists": Path(scr).exists() if scr_active else False,
+            "notes": gaussian_notes,
         },
         "work_dir": str(settings.work_dir),
         "data_dir": str(settings.data_dir),
@@ -293,14 +336,15 @@ def admin_gc(request: Request, dry_run: bool = False, authorization: Optional[st
 # ============ 输入生成 ============
 
 def _check_atom_count(n: int) -> None:
-    """M6c: 原子数提前预检，超过 max_atoms 直接 422 拒绝，避免大体系占满 15GB 内存。"""
+    """M6c: 原子数提前预检，超过 max_atoms 直接 422 拒绝，避免大体系内存爆炸。"""
     if n > settings.max_atoms:
         raise HTTPException(
             status_code=422,
             detail=(
                 f"体系含 {n} 个原子，超过本机上限 {settings.max_atoms}；"
-                "在 15GB 物理内存与 12GB Gaussian 预算下请勿提交此规模，"
-                "如需放宽请设置 GAUSSIAN_MAX_ATOMS 环境变量。"
+                f"当前 Gaussian 内存预算为 {settings.gaussian_mem_budget_mb}MB"
+                "（G09W 为 32 位程序，单进程上限约 2GB），请勿提交此规模；"
+                "如需放宽请设置 GAUSSIAN_MAX_ATOMS / GAUSSIAN_MEM_BUDGET_MB 环境变量。"
             ),
         )
 

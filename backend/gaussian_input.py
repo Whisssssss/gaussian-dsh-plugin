@@ -1,8 +1,11 @@
 """Gaussian 输入文件（.gjf）生成器。
 
-生成标准 Gaussian 16 输入：Link0 命令 + Route section + Title + 电荷自旋 + 坐标。
+生成标准 Gaussian 09/16 通用输入：Link0 命令 + Route section + Title + 电荷自旋 + 坐标。
 支持任务类型：sp / opt / freq / opt+freq / td / irc / scan。
 支持常用方法、基组、色散校正、溶剂模型、SCF 控制等关键词组合校验。
+
+Gaussian 09 与 16 的输入格式一致；差异主要在默认值（G16 默认积分格点更细、
+支持 def2 系列内置基组等）与资源上限（G09W 为 32 位程序，单进程内存约 2GB）。
 """
 from __future__ import annotations
 
@@ -139,6 +142,58 @@ def _build_route(req: GaussianInputRequest) -> Tuple[str, List[str]]:
     return route, warnings
 
 
+def _gaussian_major() -> Optional[str]:
+    """当前配置的 Gaussian 主版本（"09"/"16"，无法判断为 None）。"""
+    from .config import gaussian_version_hint, settings
+
+    return gaussian_version_hint(settings.gaussian_exe)
+
+
+def _normalize_g09_mem(mem: str) -> Tuple[str, List[str]]:
+    """G09 的 %mem 只接受【整数 MB】：写 "1.5GB" 会报 Error parsing percent card。
+
+    G09 场景下把 GB / 小数 MB 自动换算成整数 MB（G16 同样接受 MB）；
+    无法识别的写法原样保留，交给 validate_gjf 的 fail-closed 解析处理。
+    """
+    warnings: List[str] = []
+    if _gaussian_major() != "09":
+        return mem, warnings
+    text = str(mem).strip()
+    m = re.match(r"^([\d.]+)\s*([A-Za-z]*)$", text)
+    if not m:
+        return mem, warnings
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return mem, warnings
+    unit = (m.group(2) or "MB").upper()
+    if unit == "GB":
+        mb = int(round(val * 1024))
+        warnings.append(
+            f"%mem={mem} 在 Gaussian 09 中会报 'Error parsing percent card'"
+            f"（G09 只接受整数 MB），已自动改写为 %mem={mb}MB。"
+        )
+        return f"{mb}MB", warnings
+    if unit == "MB" and val != int(val):
+        mb = int(round(val))
+        warnings.append(
+            f"%mem={mem} 含小数，Gaussian 09 不接受；已自动改写为 %mem={mb}MB。"
+        )
+        return f"{mb}MB", warnings
+    return mem, warnings
+
+
+def _g09_nproc_warnings(nproc: int) -> List[str]:
+    """G09W（32 位）实测 >1 核会异常退出，给出警告（不阻断，用户可自行决定）。"""
+    if _gaussian_major() == "09" and nproc and nproc > 1:
+        return [
+            f"%nprocshared={nproc}：本机 Gaussian 09W（IA32W-G09RevC.01）实测在 >1 核时"
+            "会在 route 打印后直接退出（exit=1，无 Normal termination），"
+            "建议保持 1 核（GAUSSIAN_DEFAULT_NPROC=1）。"
+        ]
+    return []
+
+
 def generate_gjf(req: GaussianInputRequest) -> dict:
     """生成 Gaussian 输入文件内容。
 
@@ -162,6 +217,9 @@ def generate_gjf(req: GaussianInputRequest) -> dict:
     job_name = _sanitize_name(req.job_name)
     mem = req.mem or settings.default_mem
     nproc = req.nproc or settings.default_nproc
+    mem, mem_warnings = _normalize_g09_mem(mem)
+    warnings.extend(mem_warnings)
+    warnings.extend(_g09_nproc_warnings(nproc))
     chk = req.chk or f"{job_name}.chk"
     title = req.title or f"{req.method}/{req.basis} {req.job_type} for {job_name}"
 
@@ -203,7 +261,9 @@ def generate_gjf(req: GaussianInputRequest) -> dict:
     }
 
 
-# Gaussian 64-bit 下 1 word = 8 字节（W/KW/MW/GW/TW 为 word 单位，需换算）
+# Gaussian 64-bit 下 1 word = 8 字节（W/KW/MW/GW/TW 为 word 单位，需换算）。
+# G09W 是 32 位程序，1 word = 4 字节；这里统一按 8 字节换算＝在 G09W 上把用户声明
+# 的内存算得更"大"，属 fail-closed 方向（宁可误拒，不低估放行）。
 _WORD_BYTES = 8
 _WORD_MB = _WORD_BYTES / (1024 * 1024)
 
@@ -239,18 +299,39 @@ def _parse_mem_to_mb(text: str) -> float:
     raise ValueError(f"%mem 单位 '{raw_unit}' 无法识别，拒绝放行（fail-closed）：{text.strip()}")
 
 
-def validate_gjf(content: str, max_atoms: int = 300, mem_budget_mb: float = 12288.0,
-                 max_nproc: int = 8) -> None:
+def validate_gjf(content: str, max_atoms: Optional[int] = None,
+                 mem_budget_mb: Optional[float] = None,
+                 max_nproc: Optional[int] = None) -> List[str]:
     """B7: 提交边界校验原始 GJF 文本，防止用户贴入的原文绕过原子数/资源/自旋限制。
+
+    默认上限来自 settings（GAUSSIAN_MAX_ATOMS / GAUSSIAN_MEM_BUDGET_MB /
+    GAUSSIAN_MAX_NPROC），G09W 场景为 300 原子 / 2048MB / 2 核；
+    使用 Gaussian 16 时可用环境变量放宽。
+    显式传入的参数优先，便于调用方/测试覆盖。
 
     解析失败或越界抛 ValueError（由端点/管理器转成 422 或 ok=false）。
     只做保守硬校验，不阻断合法的自定义基组/附加段。
+
+    返回警告列表（不抛错的提示性内容），例如 G09W 下 %nprocshared>1
+    可能崩溃、%mem 写成小数会被 G09 拒绝等；调用方可展示给用户。
     """
+    warnings: List[str] = []
+    if max_atoms is None or mem_budget_mb is None or max_nproc is None:
+        # 惰性导入：避免模块加载即创建 work_dir/data_dir
+        from .config import settings
+        if max_atoms is None:
+            max_atoms = settings.max_atoms
+        if mem_budget_mb is None:
+            mem_budget_mb = float(settings.gaussian_mem_budget_mb)
+        if max_nproc is None:
+            max_nproc = settings.gaussian_max_nproc
+
     if not content or not content.strip():
         raise ValueError("gjf_content 为空")
 
     lines = content.splitlines()
     link0_mem = None
+    link0_mem_texts: List[str] = []
     nproc = None
     charge = None
     multiplicity = None
@@ -272,6 +353,7 @@ def validate_gjf(content: str, max_atoms: int = 300, mem_budget_mb: float = 1228
         low = line.lower()
         if low.startswith("%mem"):
             # N3: 多段 %mem 取最大值（最保守），而非被后段覆盖；未知单位 fail-closed
+            link0_mem_texts.append(line)
             mb = _parse_mem_to_mb(line)
             link0_mem = mb if link0_mem is None else max(link0_mem, mb)
             continue
@@ -308,8 +390,33 @@ def validate_gjf(content: str, max_atoms: int = 300, mem_budget_mb: float = 1228
 
     if link0_mem is not None and link0_mem > mem_budget_mb:
         raise ValueError(
-            f"%mem 申请 {link0_mem/1024:.1f}GB 超过本机预算 {mem_budget_mb/1024:.0f}GB，"
-            "15.1GB 物理内存下禁止超量申请。"
+            f"%mem 申请 {link0_mem/1024:.2f}GB 超过本机预算 {mem_budget_mb/1024:.2f}GB。"
+            "Gaussian 09W（32 位）单进程地址空间约 2GB，超出后会在 L1 直接失败；"
+            "确需更大内存请改用 Gaussian 16 并设置 GAUSSIAN_MEM_BUDGET_MB。"
         )
     if nproc is not None and nproc > max_nproc:
-        raise ValueError(f"%nprocshared={nproc} 超过本机上限 {max_nproc}，请降低并行核数")
+        raise ValueError(
+            f"%nprocshared={nproc} 超过本机上限 {max_nproc}。"
+            "G09W 为 32 位程序，并行核数过多反而更慢；"
+            "确需更多核请设置 GAUSSIAN_MAX_NPROC（G16 可用 8）。"
+        )
+
+    # G09W：%nprocshared>1 虽然通过上限校验，但本机实测会异常退出，给出警告
+    if nproc is not None and nproc > 1:
+        warnings.extend(_g09_nproc_warnings(nproc))
+
+    # G09W：%mem 不接受小数/GB 单位，提示调用方改写为整数 MB
+    if _gaussian_major() == "09":
+        for text in link0_mem_texts:
+            m = re.search(r"%mem\s*=\s*([\d.]+)\s*([A-Za-z]*)", text, re.IGNORECASE)
+            if not m:
+                continue
+            unit = (m.group(2) or "MB").upper()
+            if "." in m.group(1) or unit == "GB":
+                mb = _parse_mem_to_mb(text)
+                warnings.append(
+                    f"Gaussian 09 的 %mem 只接受整数 MB：'{text.strip()}' 会报 "
+                    f"'Error parsing percent card'，请改为 %mem={int(round(mb))}MB。"
+                )
+
+    return warnings

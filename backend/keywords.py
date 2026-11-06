@@ -12,7 +12,7 @@ KEYWORD_REFERENCE: Dict[str, List[Dict]] = {
     "任务类型": [
         {"keyword": "sp", "description": "单点能计算（默认）", "usage": "# B3LYP/6-31G(d)", "notes": "不写任务类型时默认做单点能。"},
         {"keyword": "opt", "description": "几何优化", "usage": "# B3LYP/6-31G(d) opt", "notes": "默认 Berny 算法；大体系可用 opt=loose 或 opt=gdiis。"},
-        {"keyword": "opt=calcfc", "description": "优化开始时计算解析 Hessian", "usage": "# B3LYP/6-31G(d) opt=calcfc", "notes": "大体系（>100原子）内存需求极大，15GB 机器可能爆炸；建议用 opt=calcall 或不加。"},
+        {"keyword": "opt=calcfc", "description": "优化开始时计算解析 Hessian", "usage": "# B3LYP/6-31G(d) opt=calcfc", "notes": "大体系（>100原子）内存需求极大；Gaussian 09W 是 32 位程序，%mem 上限约 2GB，calcfc 很容易 Out-of-memory，G09W 上建议用 opt=gdiis 或不加 calcfc。"},
         {"keyword": "opt=modredundant", "description": "用冗余内坐标优化，可固定/扫描键长键角", "usage": "# B3LYP/6-31G(d) opt=modredundant\n...\nB 1 2 F\nB 1 3 S 10 0.1", "notes": "在坐标后写 ModRedundant 段：F=固定，S=扫描。"},
         {"keyword": "freq", "description": "频率分析与热化学", "usage": "# B3LYP/6-31G(d) freq", "notes": "要求输入结构已是驻点；有虚频说明不是极小点。"},
         {"keyword": "opt freq", "description": "优化后立即做频率", "usage": "# B3LYP/6-31G(d) opt freq", "notes": "优化和频率用同一方法基组；最常用组合。"},
@@ -31,7 +31,7 @@ KEYWORD_REFERENCE: Dict[str, List[Dict]] = {
         {"keyword": "CCSD(T)", "description": "耦合簇（金标准）", "usage": "# CCSD(T)/cc-pVTZ", "notes": "精度极高但计算量 O(N^7)，仅适用于小分子。"},
     ],
     "SCF 控制": [
-        {"keyword": "scf=tight", "description": "更严格的 SCF 收敛判据（G16 默认）", "usage": "# B3LYP/6-31G(d) scf=tight", "notes": "Gaussian 16 默认即为 tight；G09 默认是常规。"},
+        {"keyword": "scf=tight", "description": "更严格的 SCF 收敛判据（G09/G16 默认）", "usage": "# B3LYP/6-31G(d) scf=tight", "notes": "Gaussian 09 与 16 的 SCF 默认都是 Tight；显式写出便于自查，G09 与 G16 均可直接使用。"},
         {"keyword": "scf=xqc", "description": "SCF 不收敛时自动切换算法重试", "usage": "# B3LYP/6-31G(d) scf=xqc", "notes": "难收敛体系推荐；xqc = extra QC。"},
         {"keyword": "scf=qc", "description": "强制使用 QC（二次收敛）算法", "usage": "# B3LYP/6-31G(d) scf=qc", "notes": "对极难收敛体系有效，但每步更慢。"},
         {"keyword": "scf=conventional", "description": "传统双电子积分（非 direct）", "usage": "# B3LYP/6-31G(d) scf=conventional", "notes": "小体系可加速；大体系磁盘需求大。"},
@@ -42,7 +42,7 @@ KEYWORD_REFERENCE: Dict[str, List[Dict]] = {
         {"keyword": "empiricaldispersion=gd3bj", "description": "Grimme D3 色散校正（Becke-Johnson 阻尼）", "usage": "# B3LYP/6-31G(d,p) empiricaldispersion=gd3bj", "notes": "有机分子弱相互作用、堆积体系推荐；GD3BJ 优于 GD3。"},
         {"keyword": "empiricaldispersion=gd3", "description": "Grimme D3 色散校正（零阻尼）", "usage": "# B3LYP/6-31G(d,p) empiricaldispersion=gd3", "notes": "部分文献用此版本；新计算推荐 gd3bj。"},
         {"keyword": "int=ultrafine", "description": "超精细积分格点（99,590）", "usage": "# B3LYP/6-31G(d,p) int=ultrafine", "notes": "M062X 等 meta-GGA 必须用；优化收敛更稳。"},
-        {"keyword": "int=fine", "description": "精细积分格点（75,302）", "usage": "# B3LYP/6-31G(d,p) int=fine", "notes": "G16 默认即为 fine。"},
+        {"keyword": "int=fine", "description": "精细积分格点（75,302）", "usage": "# B3LYP/6-31G(d,p) int=fine", "notes": "G09 默认即为 fine（75,302）；G16 默认改为 ultrafine（99,590），在 G16 上写 int=fine 反而比默认粗。"},
     ],
     "溶剂模型": [
         {"keyword": "scrf=(pcm,solvent=water)", "description": "PCM 隐式溶剂模型", "usage": "# B3LYP/6-31G(d) scrf=(pcm,solvent=water)", "notes": "常用溶剂：water, ethanol, methanol, acetonitrile, dichloromethane, chloroform, toluene, dmso。"},
@@ -55,10 +55,20 @@ KEYWORD_REFERENCE: Dict[str, List[Dict]] = {
         {"keyword": "gfinput", "description": "输出可被其他程序读取的轨道信息", "usage": "# B3LYP/6-31G(d) gfinput", "notes": "用于 Multiwfn 等后处理程序读取。"},
         {"keyword": "gfprint", "description": "打印完整轨道系数", "usage": "# B3LYP/6-31G(d) gfprint", "notes": "比 pop=full 更详细。"},
     ],
+    "Gaussian 09W 注意": [
+        {"keyword": "%mem", "description": "内存：G09W 只接受整数 MB", "usage": "%mem=1000MB", "notes": "写 %mem=1.5GB 会报 'Error parsing percent card'；G09W 是 32 位程序，单进程上限约 2GB，推荐 1000–1000MB。"},
+        {"keyword": "%nprocshared", "description": "并行核数：G09W 建议 1", "usage": "%nprocshared=1", "notes": "本机 IA32W-G09RevC.01 实测 >1 核会在 route 打印后直接退出（exit=1、无 Normal termination）；G16 可用 8。"},
+        {"keyword": "%nosave", "description": "任务结束后删除 scratch 文件", "usage": "%nosave（必须写在 %chk 之前）", "notes": "G09/G16 语义一致：NoSave 之前命名的 scratch/chk 会被删除，之后命名的保留；插件提交时会自动把 %nosave 放到 %chk 前。"},
+        {"keyword": "%chk", "description": "checkpoint 文件", "usage": "%chk=D:\\Gauss\\g09w\\Scratch\\job.chk", "notes": "G09W 接受绝对 Windows 路径；路径建议全 ASCII，中文目录个别版本会报 File operation error。"},
+        {"keyword": "GAUSS_EXEDIR", "description": "G09W 辅助程序目录（l1.exe 等）", "usage": "GAUSS_EXEDIR=D:\\Gauss\\g09w", "notes": "未设置时 G09W 报 'No executable for file l1.exe'（Search path GAUSS_EXEDIR is \"\"）；插件后端提交时会自动注入。"},
+        {"keyword": "GAUSS_SCRDIR", "description": "G09W scratch 目录", "usage": "GAUSS_SCRDIR=D:\\Gauss\\g09w\\Scratch", "notes": "大任务 scratch 很大，建议指向空间充足的盘；插件默认使用 g09.exe 同目录的 Scratch。"},
+    ],
     "常见错误与解决方案": [
         {"keyword": "Convergence failure", "description": "SCF 收敛失败", "usage": "scf=xqc scf=(maxcycle=200) guess=read", "notes": "方案：①加 scf=xqc；②加大 maxcycle；③用 guess=read 从 chk 读初猜；④降低积分精度 int=fine；⑤小基组预优化。"},
         {"keyword": "Error termination in l101.exe", "description": "优化失败（通常是坐标问题或不收敛）", "usage": "opt=loose 或 opt=gdiis 或 opt=calcfc", "notes": "方案：①检查初始结构合理性；②用 opt=loose 放宽判据；③用 opt=gdiis 换算法；④小基组预优化。"},
-        {"keyword": "Out-of-memory / 内存不足", "description": "内存超限", "usage": "%mem=12GB（不要超过物理内存）", "notes": "方案：①降低 mem（必须 < 物理内存）；②减少 nproc；③去掉 calcfc/calcall；④用 direct 模式减少磁盘；⑤大体系分步骤计算。"},
+        {"keyword": "Out-of-memory / 内存不足", "description": "内存超限", "usage": "%mem=1000MB（G09W 32 位，只接受整数 MB）", "notes": "方案：①降低 mem（G09W 上限约 2GB，不要写 GB 小数）；②减少 nproc（G09W 建议 1）；③去掉 calcfc/calcall；④用 direct 模式减少磁盘；⑤大体系分步骤计算。Gaussian 16 可写 %mem=12GB。"},
+        {"keyword": "Error termination request processed by link 9999", "description": "优化/IRC 未收敛，link 9999 强行终止", "usage": "在 route 加 opt=loose 或加大 maxcycles", "notes": "G09 与 G16 通用：①增加优化步数 opt=(maxcycles=200)；②opt=loose 放宽判据；③先小基组预优化；④检查初始结构。"},
+        {"keyword": "No executable for file l1.exe", "description": "G09W 找不到 l1.exe 等辅助程序（GAUSS_EXEDIR 未设置）", "usage": "set GAUSS_EXEDIR=D:\\Gauss\\g09w", "notes": "G09W 特有：启动 Gaussian 前必须让 GAUSS_EXEDIR 指向 g09.exe 所在目录，否则 log 里报 Search path GAUSS_EXEDIR is \"\"。本插件后端会自动注入该变量，也可在系统环境变量里手动设置。"},
         {"keyword": "File operation error", "description": "文件读写错误（通常是 chk 或 rwf）", "usage": "%rwf=/path/to/scratch", "notes": "方案：①检查磁盘空间；②指定 %rwf 到有空间的盘；③删除旧 chk 重新开始；④检查文件名含特殊字符。"},
         {"keyword": "Basis set specification error", "description": "基组指定错误", "usage": "用 gen 关键字 + 附加段提供基组", "notes": "方案：①确认基组名拼写；②含重元素用 ECP（如 lanl2dz, sdd）；③自定义基组用 gen/genecp。"},
         {"keyword": "The combination of multiplicity and charge is inconsistent", "description": "电荷与自旋多重度不匹配", "usage": "检查 charge 和 multiplicity", "notes": "闭壳层 multiplicity=1；自由基 multiplicity=2；电子数 = 原子序数之和 - charge；multiplicity = 2S+1。"},

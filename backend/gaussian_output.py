@@ -2,6 +2,15 @@
 
 从日志中提取：任务信息、收敛状态、最终能量、优化收敛、HOMO-LUMO、
 偶极矩、频率与虚频、热力学量、错误信息、用时。
+
+兼容 Gaussian 09 与 16（两版输出格式基本一致）：
+- 正常结束 "Normal termination of Gaussian 09/16 at ..."；
+- 错误 "Error termination via Ln1e in ... at ..."、优化不收敛的 link 9999 终止；
+- 能量 "SCF Done:  E(RB3LYP) = ..."、MP2 "EUMP2 ="、CCSD "E(CCSD) ="；
+- 轨道 "Alpha  occ./virt. eigenvalues --"（G09/G16 均为双空格分隔）；
+- 偶极 "Dipole moment (field-independent basis, Debye):"；
+- 频率 "Frequencies --"、热力学 "Zero-point correction= / Thermal correction to ..."；
+- 用时 "Job cpu time:" / "Elapsed time:"。
 """
 from __future__ import annotations
 
@@ -67,10 +76,18 @@ def parse_gaussian_log(content: str, filename: str = "") -> GaussianOutput:
     if re.search(r"Normal termination of Gaussian", content):
         out.normal_termination = True
 
-    # 错误终止
-    err_match = re.search(r"Error termination via Lnk1e in[^\n]+\n([^\n]+)", content)
+    # 错误终止（G09/G16 均输出 "Error termination via Lnk1e in <exe> at <time>"；
+    # 原实现取下一行会抓到 "Job cpu time" 之类的无关行，这里改为取同行位置信息）
+    err_match = re.search(r"Error termination via (L\w+) in ([^\n]+)", content)
     if err_match:
-        out.error_message = err_match.group(1).strip()
+        out.error_message = f"{err_match.group(1)}: {err_match.group(2).strip()}"
+        out.normal_termination = False
+    elif "Error termination request processed by link 9999" in content:
+        # G09/G16 优化/IRC 未收敛时由 link 9999 打出该行（无 Lnk1e 行）
+        out.error_message = "link 9999：几何优化/IRC 未收敛而终止"
+        out.normal_termination = False
+    elif re.search(r"Error termination in NtrErr", content):
+        out.error_message = "NtrErr：输入结构/坐标有问题导致终止"
         out.normal_termination = False
     # 常见错误
     if "Out-of-memory" in content or "out of memory" in content:
@@ -142,13 +159,19 @@ def parse_gaussian_log(content: str, filename: str = "") -> GaussianOutput:
     if "Stationary point found" in content:
         out.stationary_point = True
         out.opt_converged = True
-    # 优化步数
+    # 优化步数：G09/G16 每步打印 "Step number   1 out of a maximum of  N"；
+    # 部分任务（QST/IRC 路径）用 "Optimization cycle" 计数，两者都兼容。
     opt_step_matches = re.findall(r"Optimization cycle\s+(\d+)", content)
+    if not opt_step_matches:
+        opt_step_matches = re.findall(r"Step number\s+(\d+)", content)
     if opt_step_matches:
         out.opt_steps = int(opt_step_matches[-1])
-    # 收敛判据（逐行格式，取最后一组四行块）
+    # 收敛判据（G09/G16 相同四行块：
+    #   Maximum Force   0.000012   0.000450   YES
+    # 第二列是阈值，原正则没考虑，导致标准输出永远匹配不到；这里把阈值列设为可选。
     conv_lines = re.findall(
-        r"(Maximum Force|RMS\s+Force|Maximum Displacement|RMS\s+Displacement)\s+([\d.]+)\s+(YES|NO)",
+        r"(Maximum Force|RMS\s+Force|Maximum Displacement|RMS\s+Displacement)\s+"
+        r"([\d.]+)\s+(?:[\d.]+\s+)?(YES|NO)",
         content,
     )
     if conv_lines:

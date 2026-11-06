@@ -10,10 +10,12 @@ __pycache__/
 .venv/
 venv/
 
-# ===== PyInstaller 打包产物（不进 git，走 GitHub Release）=====
+# ===== PyInstaller 打包产物 =====
 build/
 dist/
-runtimes/
+# 本地 G09 fork：runtimes/ 含约 160MB 的后端 exe（含 RDKit/OpenBabel），
+# 为了让 clone 后即可运行，本仓库将其纳入版本控制（上游原版是走 Release）。
+# runtimes/
 
 # ===== 本地数据与日志 =====
 *.log

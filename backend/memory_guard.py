@@ -6,7 +6,8 @@
   但【绝不主动杀进程】，保护正在运行的 Gaussian 子进程，由 managed
   端点 / reconcile 回收。
 
-设计前提：物理内存仅约 15GB，Gaussian 已占 12GB，后端自身不能无界膨胀。
+设计前提：物理内存约 15GB；G09W 默认 %mem=1000MB（32 位上限约 2GB），
+后端自身不能无界膨胀，仍保留 soft/hard 阈值（可用环境变量调整）。
 """
 from __future__ import annotations
 
